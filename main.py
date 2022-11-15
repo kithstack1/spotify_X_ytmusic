@@ -92,6 +92,7 @@ def parse_args():
     parser.add_argument("--cf", type=str, help="credential file")
     parser.add_argument("--u", type=str, help="url of resource to transfer")
     parser.add_argument("--a", type=str, help="action to perform")
+    parser.add_argument("--origin_playlist_name", type=str, help="origin of playlist to transfer")
     # add args for spotify_dl
     parser.add_argument("--multi", default=1, help="download multiple songs")
     args = parser.parse_args()
@@ -181,7 +182,7 @@ def add_tospotifyplaylist(
     return sp.playlist(playlist_id)["external_urls"]["spotify"]
 
 
-def download_from_spotify(media_url, outputdir, pref_fileformat, multi):
+def download_from_spotify(media_url, outputdir, pref_fileformat, multi=5):
     """get info from spotify playlists and download songs using the spotify_dl module"""
     """playlists: list of spotify playlist urls"""
     """outputdir: directory to download songs to"""
@@ -243,7 +244,7 @@ def download_from_ytmusic(yt_object, media_url, outputdir, pref_fileformat, sp_o
         playlist_url = (
             "https://open.spotify.com/playlist/" + playlist_uri.split(":")[-1]
         )
-        download_from_spotify(playlist_url, outputdir, pref_fileformat, multi=1)
+        download_from_spotify(playlist_url, outputdir, pref_fileformat, multi=5)
     else:
         song_info = yt_object.get_song(media_url)
         song_name = song_info["title"]
@@ -251,17 +252,10 @@ def download_from_ytmusic(yt_object, media_url, outputdir, pref_fileformat, sp_o
         results = sp_object.search(q=song_name + " " + artist_name, limit=1)
         if results:
             track_uri = results["tracks"]["items"][0]["uri"]
-            sp_object.start_playback(uris=[track_uri])
-            spdl.main(
-                [
-                    "--url",
-                    track_uri,
-                    "--output",
-                    outputdir,
-                    "--format",
-                    pref_fileformat,
-                ]
-            )
+            playlist_share_url = "https://open.spotify.com/track/" + track_uri.split(
+                ":"  # noqa: E501
+            )[-1]
+            download_from_spotify(playlist_share_url, outputdir, pref_fileformat, multi=5)
 
 
 def make_upload_list(origin):
@@ -281,18 +275,27 @@ def make_upload_list(origin):
         return upload_list
 
 
-def transfer(origin, destination, targetplaylist_name, orgin_playlist_name):
+def transfer(origin, destination, targetplaylist_name, origin_playlist_name):
     """transfer playlist from origin to destination"""
     """origin and destination are either spotify or ytmusic"""
     """targetplaylist_name is the name of the playlist to transfer to"""
     """origin_playlist_name is the name of the playlist to transfer from"""
-    auth = spotipy.SpotifyOAuth(client_id=client_id, client_secret=client_secret)
-    sp = spotipy.Spotify(auth_manager=auth)
+    global session_df, client_id, client_secret
+    print(origin, destination, targetplaylist_name, origin_playlist_name)
     if origin == "spotify":
         # destination is obviously ytmusic
         # get playlist from spotify
         # make playlist on ytmusic
-
+        scope = "playlist-modify-public"
+        auth = spotipy.SpotifyOAuth(
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    redirect_uri="http://localhost:8888/callback",
+                    username=username,
+                    scope=scope,
+                )
+        sp = spotipy.Spotify(auth_manager=auth)
+        print("getting playlist from spotify")
         playlists = sp.current_user_playlists()
         for playlist in playlists["items"]:
             if playlist["name"].lower() == origin_playlist_name.lower():
@@ -301,12 +304,17 @@ def transfer(origin, destination, targetplaylist_name, orgin_playlist_name):
         playlist = sp.playlist(playlist_id)
         songs_to_add = [song["track"]["name"] for song in playlist["tracks"]["items"]]
         make_ytplaylist(targetplaylist_name, songs_to_add)
-    elif origin == "ytmusic":
+    elif origin in ["ytmusic", "youtube"]:
         # destination is obviously spotify
         # get playlist from ytmusic
         # make playlist on spotify
         yt_object = ytmusic(session_df)
-        playlist = yt_object.get_playlist(origin_playlist_name)
+        playlists = yt_object.get_library_playlists()
+        for playlist in playlists:
+            if playlist["title"].lower() == origin_playlist_name.lower():
+                playlist_id = playlist["playlistId"]
+                break
+        playlist = yt_object.get_playlist(playlist_id)
         songs_to_add = [song["title"] for song in playlist["tracks"]]
         make_spotifyplaylist(targetplaylist_name, songs_to_add)
 
@@ -347,7 +355,7 @@ def main():
             playlist_url = args.url
             outputdir = args.outputdir
             pref_fileformat = "audio/bestaudio"
-            multi = 1
+            multi = 5
             if args.url:
                 download_from_spotify(playlist_url, outputdir, pref_fileformat, multi)
             elif args.query:
@@ -363,19 +371,17 @@ def main():
 
     elif args.action == "upload":
         args.upload_list = make_upload_list(args.origin)
+        targetplaylist_name = args.targetplaylist_name
+        songs_to_add = args.upload_list
         if args.destination == "spotify":
-            targetplaylist_name = args.targetplaylist_name
             sp = spotipy.Spotify(
                 auth_manager=spotipy.SpotifyOAuth(
                     client_id=client_id, client_secret=client_secret
                 )
             )
-            songs_to_add = args.upload_list
             add_tospotifyplaylist(sp, songs_to_add, targetplaylist_name)
         elif args.destination == "youtube":
-            targetplaylist_name = args.targetplaylist_name
             yt_object = ytmusic(session_df)
-            songs_to_add = args.upload_list
             addto_ytplaylist(yt_object, songs_to_add, targetplaylist_name)
 
     elif args.action == "transfer":
